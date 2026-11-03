@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: unit, end-to-end (local web server) and CLI tests
+        run: python -m unittest discover -s tests -v
+      - name: scan the demo build with the installed CLI
+        shell: bash
+        run: |
+          pip install .
+          bundle-leak --version
+          python examples/make_demo.py
+          bundle-leak examples/demo-dist --no-color || test $? -eq 1   # exit 1 = findings, as expected
+
+  real-build:
+    # a real production build: esbuild bundles, splits, minifies and writes source maps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: install esbuild
+        run: |
+          mkdir -p "$RUNNER_TEMP/esb" && cd "$RUNNER_TEMP/esb"
+          npm init -y >/dev/null && npm install --no-audit --no-fund esbuild@0.28.1
+          echo "ESBUILD=$RUNNER_TEMP/esb/node_modules/.bin/esbuild" >> "$GITHUB_ENV"
+      - name: scan esbuild's output, as a folder and served like production
+        run: python -m unittest discover -s tests -p "test_realbuild.py" -v
