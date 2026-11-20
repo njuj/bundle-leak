@@ -8,6 +8,8 @@
 ![rules](https://img.shields.io/badge/rules-28_providers_+_maps_+_env-00ff9c?labelColor=0b0f17)
 ![license](https://img.shields.io/badge/license-MIT-00ff9c?labelColor=0b0f17)
 
+<p align="center"><img src="docs/demo.svg" width="100%" alt="bundle-leak running in a terminal"/></p>
+
 ```text
 $ bundle-leak examples/demo-dist
 
