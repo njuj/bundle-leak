@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
-from . import detectors, discover, env, sourcemap, surface
+from . import detectors, discover, env, exposed, sourcemap, surface
 from .detectors import RANK, redact
 from .fetch import Fetcher, Response, Scope
 
@@ -90,6 +90,7 @@ _NOTABLE = re.compile(r"(?i)(?:^|/)(?:\.env[^/]*|[^/]*(?:config|secret|key|auth|
                       r"openai|credential|token|server|db|database)[^/]*)$")
 _TEXT_EXT = {".js", ".mjs", ".cjs", ".html", ".htm", ".json", ".map", ".txt", ".xml", ".webmanifest"}
 _SKIP_DIRS = {"node_modules", ".git", ".svn", "__pycache__", ".turbo", ".cache"}
+_EXPOSED_NAMES = {Path(p.path).name for p in exposed.PROBES if not p.path.startswith((".env", ".git/"))}
 _SKIP_FILES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "npm-shrinkwrap.json"}
 
 
@@ -228,6 +229,12 @@ class Scanner:
         root = root.resolve()
         files = []
         for dirpath, dirnames, filenames in os.walk(root):
+            if ".git" in dirnames and Path(dirpath, ".git", "HEAD").is_file():
+                rel = _rel(Path(dirpath, ".git"), root)
+                self._add("git-exposed", "Git repository inside the build output", "high", rel + "/",
+                          "everything in the output folder is served to the public, the source history included",
+                          "Stop copying .git into the output; tools such as git-dumper rebuild the whole repository "
+                          "from it.", Location(rel + "/HEAD", 1, 1), f"exposed|git|{rel}")
             dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
             for name in sorted(filenames):
                 files.append(Path(dirpath, name))
@@ -236,6 +243,9 @@ class Scanner:
             rel = path.relative_to(root).as_posix()
             ext = path.suffix.lower()
             is_env = path.name.startswith(".env")
+            if path.name in _EXPOSED_NAMES:
+                self._exposed_file(path, rel)
+                continue
             if path.name in _SKIP_FILES or not (ext in _TEXT_EXT or is_env) or ext == ".map":
                 continue
             text = self._read(path, rel)
@@ -270,6 +280,32 @@ class Scanner:
         self._summarise()
         self.report.elapsed = time.perf_counter() - started
         return self.report
+
+    def _exposed_file(self, path: Path, rel: str):
+        try:
+            body = path.read_bytes()[:1 << 20]
+        except OSError as e:
+            self.report.errors.append(f"{rel}: {e.strerror or e}")
+            return
+        probe = next((p for p in exposed.PROBES if Path(p.path).name == path.name and p.check(body)), None)
+        if probe:
+            self._report_exposed(probe, rel, body, "in the build output, so it is served with the site")
+
+    def _report_exposed(self, probe: exposed.Probe, where: str, body: bytes, how: str):
+        text = body.decode("utf-8", "replace")
+        if probe.rule == "env-file-served":
+            names = list(dict.fromkeys(m.group(1) for m in re.finditer(r"^\s*(?:export\s+)?([A-Za-z_][\w.]*)\s*=", text, re.M)))
+            evidence = ", ".join(names[:8]) + (f", … ({len(names)} variables)" if len(names) > 8 else "")
+        elif probe.rule == "git-exposed":
+            evidence = text.strip().splitlines()[0][:80] if text.strip() else probe.path
+        else:
+            evidence = f"{len(body):,} bytes"
+        self.report.assets.append((where, "exposed", len(body)))
+        group = (urlsplit(where).netloc or "dir") if probe.rule == "git-exposed" else where   # HEAD + config: one repo
+        self._add(probe.rule, probe.title, probe.severity, evidence, how, probe.advice, Location(where, 1, 1),
+                  f"exposed|{probe.rule}|{group}")
+        if probe.scan_contents:
+            self.scan_text(text, where)
 
     def _read(self, path: Path, rel: str) -> str | None:
         try:
@@ -311,7 +347,8 @@ class Scanner:
     # ── live site ─────────────────────────────────────────────────────────────
 
     def scan_url(self, url: str, scope: str = "site", max_requests: int = 400, probe_maps: bool = True,
-                 concurrency: int = 4, timeout: float = 15.0, headers: dict | None = None) -> Report:
+                 concurrency: int = 4, timeout: float = 15.0, headers: dict | None = None,
+                 probe_files: bool = True) -> Report:
         started = time.perf_counter()
         self.report = Report(url, "url")
         self._by_key = {}
@@ -359,12 +396,23 @@ class Scanner:
                         self.scan_map(sm, map_url, final, how)
                     self.scan_text(js, final, sm)
                     wave += discover.chunks(js, final, page_url)
+            if probe_files:
+                self._probe_files(fetcher, page_url, pool, seen)
         self.report.third_party = sorted(set(self.report.third_party))
         self.report.budget_hit = fetcher.budget_hit
         self.report.requests = fetcher.requests
         self._summarise()
         self.report.elapsed = time.perf_counter() - started
         return self.report
+
+    def _probe_files(self, fetcher: Fetcher, page_url: str, pool, seen: set[str]):
+        bases = list(dict.fromkeys([urljoin(page_url, "/"), urljoin(page_url, ".")]))
+        todo = [(b + p.path, p) for b in bases for p in exposed.PROBES if b + p.path not in seen]
+        seen.update(u for u, _ in todo)
+        for (url, probe), r in zip(todo, pool.map(lambda t: fetcher.get(t[0]), todo)):
+            if r is None or not r.ok or _is_html(r) or not probe.check(r.body):
+                continue
+            self._report_exposed(probe, r.url, r.body, "anyone can download it from the site")
 
     def _fetch_script(self, fetcher: Fetcher, url: str, probe_maps: bool):
         r = fetcher.get(url)

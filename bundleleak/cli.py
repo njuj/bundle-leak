@@ -36,6 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
     web.add_argument("--scope", choices=["site", "host", "any"], default="site",
                      help="which hosts may be fetched: the same site (default), the exact host, or any")
     web.add_argument("--max-requests", type=int, default=400, metavar="N", help="request budget (default: 400)")
+    web.add_argument("--no-file-probe", action="store_true",
+                     help="do not ask for the well-known files a deploy should never serve (/.env, /.git/HEAD, backups)")
     web.add_argument("--no-map-probe", action="store_true",
                      help="only fetch source maps the bundles declare (default: also try <bundle>.map)")
     web.add_argument("--header", action="append", default=[], metavar="'Name: value'",
@@ -183,7 +185,8 @@ def main(argv: list[str] | None = None) -> int:
         scanner = Scanner(show_secrets=args.show_secrets, include_libraries=args.include_libraries)
         if target.startswith(("http://", "https://")):
             report = scanner.scan_url(target, scope=args.scope, max_requests=max(1, args.max_requests),
-                                      probe_maps=not args.no_map_probe, concurrency=args.concurrency,
+                                      probe_maps=not args.no_map_probe, probe_files=not args.no_file_probe,
+                                      concurrency=args.concurrency,
                                       timeout=args.timeout, headers=headers)
             if not report.assets:
                 print(f"bundle-leak: could not fetch {target}: {'; '.join(report.errors) or 'nothing found'}",

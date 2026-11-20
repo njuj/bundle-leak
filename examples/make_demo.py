@@ -36,6 +36,7 @@ def main(out: Path) -> None:
                       '</head><body><div id="root"></div></body></html>\n',
         "assets/index-Bq3xK9.js": entry,
         "assets/index-Bq3xK9.js.map": smap,
+        ".env": f"VITE_SUPABASE_URL=https://{ref}.supabase.co\nSTRIPE_SECRET_KEY={F.stripe()}\n",  # left in public/
     }
     for rel, text in files.items():
         path = out / rel

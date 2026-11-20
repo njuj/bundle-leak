@@ -14,10 +14,17 @@
 
 ```text
 $ bundle-leak examples/demo-dist
-
- bundle-leak v0.1.0  ·  demo-dist  ·  3 file(s), 1 KB  ·  1 source map(s)  ·  0.0s
+ bundle-leak v0.2.0  ·  demo-dist  ·  4 file(s), 1 KB  ·  1 source map(s)  ·  0.0s
 
  FINDINGS
+  ✖ CRITICAL Environment file inside the build output
+             └ .env
+               .env   everything in the output folder is served to the public
+               Delete it from the output, rotate every secret it holds, and fix the build step that copied it.
+  ✖ CRITICAL Live secret API key (Stripe / Clerk format)
+             └ .env:2:19
+               sk_live_wSWw…(40)…8lWx
+               Revoke and rotate it now (it is public already), then move the call that needs it to a server.
   ✖ CRITICAL OpenAI API key
              └ assets/index-Bq3xK9.js:1:138  →  src/config.ts:1:14
                sk-proj-D9c_…(64)…JJra
@@ -46,10 +53,10 @@ $ bundle-leak examples/demo-dist
    Supabase project             qwhxkzlpmyrtvbnsdfga.supabase.co
    API route                    /api/admin/users
 
- 2 critical  ·  1 medium  ·  2 low
+ 4 critical  ·  1 medium  ·  2 low
 ```
 
-That is the build output of a typical AI-built app (`python examples/make_demo.py`; every key in it is fake and generated at run time). The Supabase key is a JWT. bundle-leak decodes its claims offline and sees `role=service_role`, the key that bypasses Row Level Security. A Supabase *anon* key in the same place is reported as `info`, because it is meant to be public. The source map exposes the original files, so the key is traced to `src/lib/supabase.ts` line 5, right under the `// TODO: move this to the server before launch` comment that shipped with it.
+That is the build output of a typical AI-built app (`python examples/make_demo.py`; every key in it is fake and generated at run time). The Supabase key is a JWT. bundle-leak decodes its claims offline and sees `role=service_role`, the key that bypasses Row Level Security. A Supabase *anon* key in the same place is reported as `info`, because it is meant to be public. The source map exposes the original files, so the key is traced to `src/lib/supabase.ts` line 5, right under the `// TODO: move this to the server before launch` comment that shipped with it. And the `.env` someone dropped into `public/` was copied into the output, so it would be served next to the app.
 
 ## Why this matters
 
@@ -65,19 +72,66 @@ That is the build output of a typical AI-built app (`python examples/make_demo.p
 | **Public-by-design keys** | Firebase web config, Supabase anon keys and Stripe publishable keys are recognised and *not* raised as leaks. A Google API key outside a Firebase config is `medium`: fine only if it is restricted |
 | **Public env vars** | every `NEXT_PUBLIC_` / `VITE_` / `REACT_APP_` / `EXPO_PUBLIC_` … variable in the bundle, and an alarm when its *name* says secret (`VITE_SUPABASE_SERVICE_ROLE_KEY`, `NEXT_PUBLIC_DATABASE_URL`) |
 | **Source maps** | declared, inline (`data:`), sent in a `SourceMap` header, or *hidden* (served but not referenced). The original files inside them are scanned too, `node_modules` excluded |
+| **Files a deploy should never serve** | `/.env` (and `.env.local`, `.env.production` …), `/.git/HEAD` and `/.git/config`, `.npmrc`, `.htpasswd`, `docker-compose.yml`, `backup.zip`-style archives and `.DS_Store`, at the site root and in the app's folder. Each is recognised by its **content**, so an SPA that answers every path with its `index.html`, or a host that sends 200 "Not Found", never produces one. A served `.env` is reported with its variable *names* only, and its secrets go through the same detectors as the bundles |
 | **Attack surface** | internal hosts and private IPs, staging and dev hosts, the backend services the app talks to (Supabase, Firebase, S3, Cloud Run …), API routes such as `/api/admin/*` |
 
 ## How it reads a live site
 
 * It fetches the page, its `<script>` and `modulepreload` files, then every chunk those scripts can load. Lazy chunks never appear in the HTML, so it reads them out of the JavaScript statically: ES `import()`, Vite's `__vite__mapDeps` lists, the Next.js build manifest, and webpack's runtime chunk table (`"static/chunks/"+e+"."+{42:"abcd…"}[e]+".js"`), rebuilt into real URLs. Nothing is executed.
 * **Polite by construction.** It only sends GET requests, only on the same site by default (`--scope`), within a request budget (400 by default), with every body capped (also after gzip). Redirects are followed only while they stay in scope. The User-Agent says what it is. A host that answers every path with its `index.html` (most SPA hosts do) is recognised, so a guessed `.map` URL never produces a false "exposed".
+* **17 extra requests, by default.** After the bundles it asks for the well-known files above (one GET each, in the request budget). `--no-file-probe` turns that off.
 * Third-party scripts (CDNs, analytics) are listed but never fetched.
+
+## A file that should never have been deployed
+
+The most common leak is not in the bundle at all: a `.env` that ended up in the web root, or a whole project folder
+rsynced to the server, `.git` included. On a live site bundle-leak asks for those paths and checks what comes back:
+
+```text
+$ bundle-leak http://127.0.0.1:50804/
+
+ bundle-leak v0.2.0  ·  http://127.0.0.1:50804/  ·  6 file(s), 75 KB  ·  19 request(s)  ·  0.1s
+
+ FINDINGS
+  ✖ CRITICAL Database URL with a password
+             └ .env.production:1:30
+               postgres://shop:•••@db.internal   postgres://shop:•••@db.internal
+               Change the password and keep connection strings on the server.
+  ✖ CRITICAL Environment file served to anyone
+             └ .env.production
+               DATABASE_URL, STRIPE_SECRET_KEY, SESSION_SECRET, SMTP_HOST   anyone can download it from the site
+               Remove it from the web root, rotate every secret it holds (it is public already), and fix the deploy step that copied it.
+  ✖ CRITICAL Live secret API key (Stripe / Clerk format)
+             └ .env.production:2:19
+               sk_live_fjkk…(40)…DV1v
+               Revoke and rotate it now (it is public already), then move the call that needs it to a server.
+  ✖ HIGH     Archive of the site served
+             └ backup.zip
+               76,124 bytes   anyone can download it from the site
+               Delete it from the web root: archives like this usually hold the source and its config.
+  ✖ HIGH     Git repository served: source code and history can be downloaded
+             └ .git/HEAD
+               .git/config
+               ref: refs/heads/main   anyone can download it from the site
+               Block /.git/ on the server and stop deploying it; tools such as git-dumper rebuild the whole repository, history and old secrets included, from these files.
+
+ ATTACK SURFACE
+   API route                    /api/cart
+
+ 3 critical  ·  2 high
+```
+
+That is the test server from [`tests/test_exposed.py`](tests/test_exposed.py) set up as a shop (fake keys). It answers every
+other path with its `index.html`, like Netlify or Vercel would, and none of those answers is reported. The `.git/HEAD`
+and `.git/config` hits are one finding: it is one repository. Pointed at a build folder, the same checks run on the
+files themselves (a `.git` folder or an `.npmrc` inside `dist/`).
 
 ## Proof that it works
 
 | Check | Result |
 |---|---|
-| unit, end-to-end and CLI tests | **64** (plus 2 real-build tests in CI) |
+| unit, end-to-end and CLI tests | **70** (plus 2 real-build tests in CI) |
+| exposed files: a live site with `.env`, `.git` and a backup zip; an SPA that answers everything with 200; a host that answers everything with 200 "Not Found"; Python's own `http.server` serving the demo build | every real file found, nothing reported on the fallback hosts, nothing requested with `--no-file-probe` |
 | live-site tests against a local server that behaves like production hosting: a Vite app with declared and hidden maps, gzip, a redirect off-site, an SPA fallback; and a Next.js app with webpack chunks and a build manifest | every key found, every chunk discovered, nothing fetched off-site, no file fetched twice |
 | **a real production build**: esbuild bundles, splits, minifies and writes source maps, in CI | keys found in the output and traced back to `src/admin.js:1` and `src/main.js:2` |
 | source-map decoder on 4 real webpack / esbuild maps (7 MB) | 96.4% of 3,485 string literals map onto an original line holding that literal; the rest are strings the compiler wrote itself (e.g. `"continue"` from async/await down-levelling) |
@@ -106,6 +160,7 @@ bundle-leak dist/ --json | jq '.findings[] | select(.severity=="critical")'
 | `--scope site\|host\|any` | which hosts a live scan may fetch (default: the same site) |
 | `--max-requests N` · `--timeout S` · `--concurrency N` | politeness limits for live scans |
 | `--no-map-probe` | fetch only the source maps the bundles declare |
+| `--no-file-probe` | do not ask for `/.env`, `/.git/HEAD` and the other files a deploy should never serve |
 | `--header 'Name: value'` | e.g. a session cookie for a staging site you own |
 
 Exit codes: `0` nothing at or above `--fail-on`, `1` findings, `2` the target could not be scanned.
@@ -123,6 +178,7 @@ In GitHub Actions, after your build step:
 ## Limits, plainly
 
 * It finds secrets by their documented formats. A key with no recognisable format only shows up if it is assigned to a secret-sounding name and looks random.
+* The file probe asks for 17 fixed paths at the site root and the app's folder. It does not guess other names (`.env.old`, `site-2024.tar.gz`) or crawl directory listings.
 * It reads what the server sends. Code that only exists after login is out of reach unless you pass a `--header` for a site you own.
 * Without the Public Suffix List, the "same site" check treats the last two labels as the site (three for `co.uk`-style names). Use `--scope host` to be strict.
 * A finding means the secret is public **now**. Removing it from the next build does not undo that, so rotate it.
