@@ -1,5 +1,7 @@
 # bundle-leak
 
+[![Part of Cryptid Security](https://img.shields.io/badge/part_of-Cryptid%20Security-00ff9c?style=flat-square&labelColor=0d1117)](https://github.com/cryptid-security)
+
 **Find what your web app ships to every visitor that it shouldn't.** Every browser downloads your JavaScript bundles, and often your source maps along with them. AI-built and rushed apps routinely put a Supabase `service_role` key, an OpenAI key or a database URL in there. bundle-leak reads exactly those files, either from a live site (fetching only what a browser would) or from your build folder before you deploy. It finds the secrets, traces each one back to the original source line through the source map, and tells you what the key unlocks. Pure Python standard library, zero dependencies.
 
 [![ci](https://github.com/njuj/bundle-leak/actions/workflows/ci.yml/badge.svg)](https://github.com/njuj/bundle-leak/actions/workflows/ci.yml)
